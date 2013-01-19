@@ -71,7 +71,7 @@ class DHCP_takeover:
                 self.attempted_dhcpnaks[packet[Ether].src] = 0
 
             if self.attempted_dhcpnaks[packet[Ether].src] < self.nak_limit:
-                attempted_dhcpnaks[packet[Ether].src] += 1
+                self.attempted_dhcpnaks[packet[Ether].src] += 1
                 self.nak_request(packet)
             else:
                 print "Giving up on spoofing DHCPNAK's for %s, failed" % packet[Ether].src
